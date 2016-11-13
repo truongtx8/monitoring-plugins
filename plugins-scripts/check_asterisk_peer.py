@@ -1,14 +1,14 @@
 #!/usr/bin/python
 
-import os, sys, socket, string
+import os, sys, socket, string, time
 from optparse import *
 
 """
-Check_peer_status plugin for monitoring. Copyright (c) 2013 Andrea Zorzetto
+Check_peer_status plugin for Nagios Copyright (c) 2013 Andrea Zorzetto
 This plugin is renamed to check_asterisk_peer and added support pjsip
     by Truong Ta.
 
-Version 0.3.0 updated at 29/04/2016
+Version 0.3.1 updated at 10/11/2016
 
 This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -31,10 +31,11 @@ state_unknown = 3
 exitcode      = 3
 
 # Process the command line...
-parser = OptionParser(usage="check_asterisk_peer [options]", version="%prog 0.3.0")
+parser = OptionParser(usage="check_asterisk_peer [options]", version="%prog 0.3.1")
 parser.set_defaults(hostname='127.0.0.1')
 parser.set_defaults(port=5038)
 parser.set_defaults(peer="")
+parser.set_defaults(aversion=14)
 
 
 parser.add_option("-u", "--username", action="store", dest="user",
@@ -45,9 +46,11 @@ parser.add_option("-H", "--host", action="store", dest="hostname",
         help="the host to connect to. The default is localhost.")
 parser.add_option("-P", "--port", action="store", dest="port",
         help="the port to contact. Default is 5038.")
+parser.add_option("-A", "--asterisk-version", action="store", dest="aversion",
+        help="Asterisk version. Default is 14.")
 
 parser.add_option("-t", "--type", action="store", dest="type",
-        help="sip or iax are allowed values.")
+        help="sip, pjsip or iax are allowed values.")
 parser.add_option("-p", "--peer", action="store", dest="peer",
         help="the peer name to check.")
 parser.add_option("-w", "--warning", action="store", dest="warning",
@@ -97,11 +100,12 @@ logout = """Action: logoff\r\n\r\n"""
 
 
 
-#global port
+#global variables
 host = options.hostname
 port = int(options.port)
 user = options.user
 password = options.secret
+aversion = int(options.aversion)
 
 def connect(host, user, password):
 	mysocket.connect((host, port))
@@ -115,16 +119,43 @@ def disconnect(logout):
 
 def send_command(action):
 	mysocket.send(action)
+	
+	timer = time.time()
+	timeout = 3.0
+	mysocket.settimeout(timeout)
+	
 	global myrcvd
 	myrcvd = ""
+	
 	while 1:
-		data = mysocket.recv(4096)    #The output bytes from the socket connection. You can adjust size to taste.
-		myrcvd = myrcvd + data
-		#print "$"+ data +"_"
-		#print len(data)
-		
-		if (len(data)==0) or (string.find(data,'END COMMAND')>0):
+		if time.time() - timer > timeout:
 			break
+
+		try:
+			data = mysocket.recv(4096) #The output bytes from the socket connection. You can adjust size to taste.
+			if data:
+				myrcvd = myrcvd + data
+				
+				timer = time.time()
+				if (timeout > 0.1):
+					timeout /= 2
+					mysocket.settimeout(timeout)
+				
+				if (string.find(data,'END COMMAND') > 0):
+					break
+			else:
+				time.sleep(0.1)
+				break
+	
+			#print "$"+ data +"___"
+			#print len(data)
+		except:
+			timeout += 0.1
+			mysocket.settimeout(timeout)
+			pass
+		
+		#print str(timeout) + " | " + str(timer)
+
 	return myrcvd
 
 def get_peer_status(myrcvd):
@@ -160,30 +191,40 @@ try:
 		if (options.all) or (options.verbose):
 			print result
 
-		elif (options.type=="pjsip"):
+		elif (options.type == "pjsip"):
 			status = get_pjsip_status(result)
-
+			
 			if (string.find(status.lower(),'unavail') >0):
 				print status.split()[0].split("/")[0] + " " + status.split()[1] + "|RTT=0ms;;;"
 				exitcode = state_critical
 			
 			elif (string.find(status.lower(),'avail') >0):
-				if(options.warning) and (options.critical):
-					print status.split()[0].split("/")[0] + " " + status.split()[1] + " RTT=" + status.split()[2] + "ms" \
-					+ "|RTT=" + get_pjsip_status(result).split()[2] + "ms;" + options.warning + ";" + options.critical + ";0;"
-
-					if (float (status.split()[2]) > float(options.critical)):
-						exitcode = state_critical
-					elif (float (status.split()[2]) > float(options.warning)):
-						exitcode = state_warning
-					else:
-						exitcode = state_ok
-	
+				if (aversion <= 13):
+					status_rtt = status.split()[2]
 				else:
-					print status.split()[0].split("/")[0] + " " + status.split()[1] + " RTT=" + status.split()[2] + "ms" \
-					+ "|RTT=" + get_pjsip_status(result).split()[2] + "ms;;;;"
+					status_rtt = status.split()[3]
+					
+				try:
 
-					exitcode = state_ok
+					if(options.warning) and (options.critical):
+						print status.split()[0].split("/")[0] + " " + status.split()[1] + " RTT=" + status_rtt + "ms" \
+						+ "|RTT=" + status_rtt + "ms;" + options.warning + ";" + options.critical + ";0;"
+	
+						if (float(status_rtt) > float(options.critical)):
+							exitcode = state_critical
+						elif (float(status_rtt) > float(options.warning)):
+							exitcode = state_warning
+						else:
+							exitcode = state_ok
+		
+					else:
+						print status.split()[0].split("/")[0] + " " + status.split()[1] + " RTT=" + status_rtt + "ms" \
+						+ "|RTT=" + status_rtt + "ms;;;;"
+	
+						exitcode = state_ok
+				except:
+					print "Oops! Something goes wrong"
+					exitcode = state_unknown
 			
 			else:
 				print options.peer + " is not defined or never connected"
